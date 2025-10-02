@@ -1,7 +1,5 @@
 import torch
 import numpy as np
-import pygame
-from pathlib import Path
 import json
 import os
 import matplotlib.pyplot as plt
@@ -17,10 +15,10 @@ class Rule110Universality():
             Parameters:
             size : 2-uple (H,W)
                 Shape of the CA world
-            wolfram_num : int
-                Number of the wolfram rule
-            random : bool
-                If True, the initial tape of the automaton is random. Otherwise, the initial tape is 'YN'
+            tape_symbols : string of symbols "Y" and "N"
+                Initial tape of the cyclic tag system being simulated, example: "YNYNNY"
+            cyclic_tag : list of strings corresponding to the appendants of the cyclic tag system, example: ["YYNYNY", "", "YYYNYY"]
+                In order for the cyclic tag to be admissible, each appendant must be either empty or have length divisible by 6. First appendant cannot be empty.   
         """
         self.w = size
         self.rule = self.convert_wolfram_num(110) # (8,) tensor, rule[i] is 0 if the i'th neighborhood yields 0, 1 otherwise
@@ -28,86 +26,76 @@ class Rule110Universality():
         self.init_tape = tape_symbols
 
         # load dictionaries and glider patterns
-        self.load_patterns()
+        self.load_gliders()
         self.init_cyclic_tag_data()
-        self.e_speed = 4/15
-        self.a_speed = 2/3
-
-        #initialize keyboard step sizes
-        self.left_step_size = self.w//20
-        self.right_step_size = self.w//20
 
         #set up world parameters
-        self.offset = 100 # margin to circumvent coarse graining missing a pattern cut in half at the border
-        self.world = torch.zeros((self.w+2*self.offset),dtype=torch.int) # Vector of W elements
-        #self.render_size =  60 if self.h <= 600 else int(60*(self.h//600))
-        self.render_size =  210
-        self.worlds = torch.ones((self.render_size, self.w+2*self.offset), dtype=torch.int) # Vector of (render_size, W) elements
         self.time = 0 # Current time step, to keep track for plotting the full evolution
 
         #set up colors
         self.color0 = torch.tensor([1.,1.,1.])
         self.color1 = torch.tensor([0.,0.,0.])
-        self.ethercolor1 = torch.tensor([0.96,0.96,0.96])
-        self.ncolor0 = torch.tensor([1.,1.,1.])
-        self.ncolor1 = torch.tensor([0.549, 0.071, 0.086])
-        self.ycolor1 = torch.tensor([0.031, 0.322, 0.125])
-        self.moving_n_color1 = torch.tensor([0.678, 0.18, 0.639])
-        self.moving_y_color1 = torch.tensor([0.18, 0.267, 0.678])
-        self.colors = torch.stack([self.color0, self.color1, self.ethercolor1, self.ncolor0, self.ncolor1, self.ycolor1, self.moving_n_color1, self.moving_y_color1])
+        self.colors = torch.stack([self.color0, self.color1])
 
-        
+    def load_gliders(self):
+        """
+            Loads glider patterns and dictionaries from json files.
+        """
 
-    def load_patterns(self):
-        self.dict_yn = json.load(open('utils/dict_yn.json', 'r'))
-        self.dict_rl = json.load(open('utils/dict_rl.json', 'r'))
-        self.dict_oss = {0: (1, 1), 1: (2, 0), 2:(0, 0)} #dictionary for ossifiers; example: if last appended ossifier is O[1], then what gets prepended is 0[2]+0*ether+(short or long distance * ether) 
-        self.gliders = json.load(open('utils/gliders.json', 'r'))
+        # dictionaries are used to track how to add to together different "puzzle pieces" of gliders depending on their temporal phase
+        self.dict_yn = json.load(open('utils/dict_yn.json', 'r')) # Y and N symbols, used to encode the appendants
+        self.dict_rl = json.load(open('utils/dict_rl.json', 'r')) # raw leaders, used to encode the raw leaders
+        self.dict_oss = {0: (1, 1), 1: (2, 0), 2:(0, 0)} #dictionary for ossifiers (with temporal phases 0, 1, and 2); example: if last appended ossifier is O[1], then what gets prepended is 0[2]+0*ether+(short or long distance * ether) 
+        self.dict_sc_sl = json.load(open('utils/dict_sc_sl.json', 'r')) # dictonary specifying how to append short leader (for an empty appendant) after a standard component (non-empty appendant)
+        self.dict_sl_rl = json.load(open('utils/dict_sl_rl.json', 'r')) # dictionary specifying how to append raw leader (for a non-empty appendant) after a short leader (empty appendant)
+        self.dict_sl_sl = json.load(open('utils/dict_sl_sl.json', 'r')) # dictionary specifying how to append short leader (for an empty appendant) after a short leader (empty appendant)
+
+
+        # load glider patterns
+        self.gliders = json.load(open('utils/gliders.json', 'r')) 
 
         self.ether = self.gliders['ether']
         self.str_ether = self.to_str(self.ether)
         self.Y = self.gliders['Y']
         self.N = self.gliders['N']
-        self.L = self.gliders['L']
-        self.strL = ["".join(str(s) for s in l) for l in self.gliders['L']]
-        self.C2 = self.gliders['C2']
+        self.C2 = self.gliders['C2'] #C2 glider, part of all static tape symbols
         self.strC2 = ["".join(str(s) for s in self.ether+c+self.ether) for c in self.gliders['C2']]
-        self.PC = self.gliders['PC']
-        self.strPC = ["".join(str(s) for s in pc) for pc in self.gliders['PC']]
-        self.SC = self.gliders['SC']
-        self.strSC = ["".join(str(s) for s in sc) for sc in self.gliders['SC']]
-        self.O = self.gliders['O']
+        self.PC = self.gliders['PC'] # principal component
+        self.SC = self.gliders['SC'] #standard component
+        self.O = self.gliders['O'] #ossifier
         self.strO = ["".join(str(s) for s in o) for o in self.gliders['O']]
-        self.RL = self.gliders['RL']
+        self.RL = self.gliders['RL'] #raw leader
         self.strRL = ["".join(str(s) for s in rl) for rl in self.gliders['RL']]
-        self.L = self.gliders['L']
+        self.SL = self.gliders['SL'] #short leader
+        self.strSL = ["".join(str(s) for s in sl) for sl in self.gliders['SL']]
+        self.L = self.gliders['L'] #leader
+        self.L_beg = self.gliders['L_beg'] #beginning of ready leaders, both the long one and the short one
+        self.strL_beg = ["".join(str(s) for s in l_beg) for l_beg in self.gliders['L_beg']]
         self.strE = ["".join(str(s) for s in e) if len(e)> 20 else "".join(str(s) for s in e+self.ether) for e in self.gliders['E']]
         self.strA4 = ["".join(str(s) for s in a) if len(a)> 20 else "".join(str(s) for s in a+self.ether) for a in self.gliders['A4']]
-        self.Y_middle = self.gliders['Y_middle']
-        self.N_middle = self.gliders['N_middle']
-        self.N_outer = self.gliders['N_outer']
-        self.Y_outer = self.gliders['Y_outer']
+        
+        self.Ymiddle = self.gliders['Ymiddle']
+        self.Nmiddle = self.gliders['Nmiddle']
+        self.Nouter = self.gliders['Nouter']
+        self.Youter = self.gliders['Youter']
 
-        self.N_moving_middle = self.gliders['N_moving_middle']
-        self.Y_moving_middle = self.gliders['Y_moving_middle']
-
-        self.Y_middle_torch = [torch.tensor(e, dtype=torch.uint8) for e in self.pad_patterns(self.Y_middle)]
-        self.Y_outer_torch = [[torch.tensor(e1, dtype=torch.uint8), torch.tensor(e2, dtype=torch.uint8)] for e1, e2 in self.Y_outer]
-        self.N_middle_torch = [torch.tensor(e, dtype=torch.uint8) for e in self.pad_patterns(self.N_middle)]
-        self.N_outer_torch = [[torch.tensor(e1, dtype=torch.uint8), torch.tensor(e2, dtype=torch.uint8)] for e1, e2 in self.N_outer]
-        self.N_moving_middle_torch = [torch.tensor(e, dtype=torch.uint8) for e in self.N_moving_middle]
-        self.Y_moving_middle_torch = [torch.tensor(e, dtype=torch.uint8) for e in self.Y_moving_middle]
+        self.Y_middle_torch = [torch.tensor(e, dtype=torch.uint8) for e in self.pad_patterns(self.Ymiddle)]
+        self.Y_outer_torch = [[torch.tensor(e1, dtype=torch.uint8), torch.tensor(e2, dtype=torch.uint8)] for e1, e2 in self.Youter]
+        self.N_middle_torch = [torch.tensor(e, dtype=torch.uint8) for e in self.pad_patterns(self.Nmiddle)]
+        self.N_outer_torch = [[torch.tensor(e1, dtype=torch.uint8), torch.tensor(e2, dtype=torch.uint8)] for e1, e2 in self.Nouter]
         self.ether_pattern = torch.tensor(self.ether)
 
         self.ether_pattern_len = len(self.ether_pattern)  
         self.y_middle_pattern_len = len(self.Y_middle_torch[0])
         self.y_outer_pattern_len = len(self.Y_outer_torch[0][0])
         self.n_middle_pattern_len = len(self.N_middle_torch[0])
-        self.n_outer_pattern_len = len(self.N_outer_torch[0][0])
-        self.n_moving_middle_pattern_len = len(self.N_moving_middle[0])
-        self.y_moving_middle_pattern_len = len(self.Y_moving_middle[0])
+        self.n_outer_pattern_len = len(self.N_outer_torch[0][0]) 
 
-        self.newC2 = [self.ether+c2+self.ether for c2 in self.C2]
+        
+
+        #glider speeds
+        self.e_speed = 4/15
+        self.a_speed = 2/3
 
     def convert_wolfram_num(self,wolfram_num : int):
         """
@@ -122,6 +110,77 @@ class Rule110Universality():
 
         return out.to(dtype=torch.int) # (Array of 8 elements, where out[i]=0 if the  neighborhood number i yields 0)
 
+    def init_cyclic_tag_data(self):
+        self.max_appendant_len = max(len(a) for a in self.cyclic_tag)
+
+        self.tot_symbols = "".join(self.cyclic_tag)
+        self.total_num_of_symbols = len("".join(self.cyclic_tag))
+
+        self.num_ys = self.tot_symbols.count("Y")
+        self.num_ns = self.tot_symbols.count("N")
+        self.num_empty = self.cyclic_tag.count("")
+        self.num_non_empty = len(self.cyclic_tag)-self.num_empty
+
+        self.long_ossifier_distance =  int((76*self.num_ys+80*self.num_ns+60*self.num_non_empty+43*self.num_empty)//4)*4*2+3    #to be double-checked, is from Cooks paper concrete view of rule 110 computation 
+
+    def step(self, it = 1, update = True):
+        """
+            Iterates the automaton one timestep.
+        """
+        for _ in range(it):
+            indices = (torch.roll(self.hidden_world,shifts=(1))*4+self.hidden_world*2+torch.roll(self.hidden_world,shifts=(-1))*1) # (W,), compute in parallel all sums
+            self.hidden_world=self.rule[indices] # This is the same as [ rule[indices[i]] for i in range(W)]
+            self.time += 1
+            if (not self.time%210) and update: #check whether a configuration needs to be prolonged by periodic patterns
+                self.update_hidden_world()
+
+    def plot_worldmap(self, save_path = None, title = None):
+        height, width, _ = self._worldmap.shape
+        aspect_ratio = width / height
+        plt.figure(figsize=(aspect_ratio * 10, 10))  # Adjust the scaling factor (e.g., 10) as needed
+        plt.imshow(self._worldmap)
+        plt.axis('off')
+        if title:
+            plt.title(title, fontsize=20)
+
+        if save_path:
+            plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
+        else:
+            plt.show()
+
+    def draw(self, iterations, save_path = None, title = None):
+        self._worldmap = torch.zeros((iterations, self.w, 3), dtype=torch.float32)
+        self.worlds = torch.zeros((iterations, self.w), dtype=torch.int) # Vector of (render_size, W) elements
+
+        self.init_hidden_world = self.hidden_world.clone()
+        self.init_time = self.time
+
+        l = self.find_leader()
+        if not l:
+            print("no leader found")
+            self.img_center = self.world_center
+        else:
+            self.img_center = l
+
+        for i in range(iterations):
+            self.step(update = False)
+            # CHANGE: Make world a local variable instead of self.world
+            world = self.hidden_world[self.img_center-int(self.w//2):self.img_center+int(self.w//2)]
+            self.worlds[i, :] = world
+            
+        #self.worlds = self.coarse_grain(self.worlds)
+
+        for i in range(iterations):
+            self._worldmap[i, :, :] = self.colors[self.worlds[i, :]]
+
+        self.plot_worldmap(save_path, title = None)
+
+        self.hidden_world = self.init_hidden_world.clone()
+        self.time = self.init_time
+
+    
+
+    """ General utility functions """
     def to_str(self, config):
         if isinstance(config, np.ndarray) or isinstance(config, list):
             return "".join(str(s) for s in config)
@@ -136,79 +195,7 @@ class Rule110Universality():
             residue = diff%len(self.ether)
             L[i] = l + num_ethers*self.ether + self.ether[:residue]
         return L
-
-    def init_cyclic_tag_data(self):
-        self.max_appendant_len = max(len(a) for a in self.cyclic_tag)
-        self.min_appendant_len = min(len(a) for a in self.cyclic_tag)
-
-        self.tot_symbols = "".join(self.cyclic_tag)
-        self.total_num_of_symbols = len("".join(self.cyclic_tag))
-
-        self.num_ys = self.tot_symbols.count("Y")
-        self.num_ns = self.tot_symbols.count("N")
-        self.num_empty = self.cyclic_tag.count("")
-        self.num_non_empty = len(self.cyclic_tag)-self.num_empty
-
-        self.long_ossifier_distance =  int((76*self.num_ys+80*self.num_ns+60*self.num_non_empty+43*self.num_empty)//4)*4*2+3    #to be double-checked, is from Cooks paper concrete view of rule 110 computation 
-
-    def encode_raw_leader(self, e_i):
-        rl_i, num_ethers = self.dict_rl[str(e_i)]
-        config=self.ether*num_ethers+self.RL[rl_i]
-        return config, (rl_i+22)%30
-
-    def encode_appendant(self, yn_seq, leader_i):
-        assert (len(yn_seq)%6)==0
-        config = []
-        
-        i=leader_i
-        for char_i, C in enumerate(yn_seq):
-            j, num_ether = self.dict_yn[str(i)]["0"]
-            if char_i ==0:
-                config+=self.ether*num_ether+self.PC[j]
-                j=(j+14)%30
-            else:
-                config+=self.ether*num_ether+self.SC[j]
-            k, num_ether = self.dict_yn[str(j)][C]
-            config+=self.ether*num_ether+self.SC[k]
-            i = k
-
-        return config, i
-
-    def encode_tape(self):
-        config=3*self.ether
-        for C in self.init_tape:
-            if C == "Y":
-                config+=self.ether+self.Y[0]+6*self.ether
-            if C == "N":
-                config+=self.ether+self.N[0]+7*self.ether
-        leader_index=2
-        config+=4*self.ether+self.L[leader_index]
-        
-        return config, (leader_index+18)%30
-
-    def encode_cyclic_tag(self, num_cyclic_tag):
-        config=[]
-        cyclic_tag = self.cyclic_tag*num_cyclic_tag
-        e_i = self.last_e_glider_index
-        for appendant in cyclic_tag:
-            a, e_i = self.encode_appendant(appendant, leader_i=e_i)
-            config+=a+8*self.ether
-            l, e_i = self.encode_raw_leader(e_i)
-            config+=l
-        self.last_e_glider_index = e_i
-        return config
-
-    def encode_ossifiers(self, num_ossifiers):
-        oss_index, num_ether = self.dict_oss[self.oss_index]
-        ossifiers = self.O[oss_index]+self.ether*(num_ether+self.long_ossifier_distance)
-        #print("new oss index: ", oss_index)
-        for o in range(num_ossifiers-1):
-            oss_index, num_ether = self.dict_oss[oss_index]
-            #print("new oss index: ", oss_index)
-            ossifiers = self.O[oss_index]+self.ether*(num_ether+self.long_ossifier_distance)+ossifiers
-        self.oss_index = oss_index
-        return ossifiers
-
+    
     def crop(self, str_c):
         i = str_c.index(self.str_ether)
         str_c = str_c[i:]
@@ -219,21 +206,14 @@ class Rule110Universality():
         while str_c.endswith(self.str_ether):
             str_c = str_c[:-14]
         return [int(i) for i in str_c]
-
-    def left_crop(self, str_c):
-        i = str_c.index(self.str_ether)
-        str_c = str_c[i:]
-        while str_c.startswith(self.str_ether):
-            str_c = str_c[14:]
-        return [int(i) for i in str_c]
-
+    
     def right_crop(self, str_c):
         i = str_c.rfind(self.str_ether)
         str_c = str_c[:i]
         while str_c.endswith(self.str_ether):
             str_c = str_c[:-14]
         return [int(i) for i in str_c]
-
+    
     def left_hard_croppable(self, str_c):
         if str_c.startswith(self.str_ether):
             return True
@@ -273,15 +253,128 @@ class Rule110Universality():
             str_c = str_c[index:]
 
         return [int(i) for i in str_c]
+    
+    def find_leader(self):
+        self.str_c = self.to_str(self.hidden_world)
+        for l in self.strL_beg:
+            if l in self.str_c:
+                return self.str_c.index(l)
+        return None
+    
+    """ Defining Encoder, used to encode the cyclic tag system into the rule 110 world 
+        The configuration created by the encoder is naturally finite, for practical purposes, and gets prolonged by periodic sequences during the iteration whenever necessary."""
 
-    def get_init_hidden_world(self):
+    def encode_raw_leader(self, e_i):
+        rl_i, num_ethers = self.dict_rl[str(e_i)]
+        config=self.ether*num_ethers+self.RL[rl_i]
+        return config, (rl_i+22)%30
+
+    def encode_appendant(self, yn_seq, leader_i):
+        assert (len(yn_seq)%6)==0
+        config = []
+        
+        i=leader_i
+        for char_i, C in enumerate(yn_seq):
+            j, num_ether = self.dict_yn[str(i)]["0"]
+            if char_i ==0:
+                config+=self.ether*num_ether+self.PC[j]
+                j=(j+14)%30
+            else:
+                config+=self.ether*num_ether+self.SC[j]
+            k, num_ether = self.dict_yn[str(j)][C]
+            config+=self.ether*num_ether+self.SC[k]
+            i = k
+
+        return config, i
+
+    def encode_tape(self):
+        config=3*self.ether
+        for C in self.init_tape:
+            if C == "Y":
+                config+=self.ether+self.Y[0]+6*self.ether
+            if C == "N":
+                config+=self.ether+self.N[0]+7*self.ether
+        return config
+
+    def encode_cyclic_tag(self, num_cyclic_tag):
+        config=[]
+        cyclic_tag = self.cyclic_tag*num_cyclic_tag
+        e_i = self.last_e_glider_index
+
+        appendant = cyclic_tag[0]
+
+        #print("last e glider index: ", e_i)
+        a, e_i = self.encode_appendant(appendant, leader_i=e_i)  #we assume first appendant is always non-empty
+        config+=a+8*self.ether
+
+
+        for appendant_prev, appendant_now in zip(cyclic_tag, cyclic_tag[1:]):
+            #print("app_prev: ", appendant_prev)
+            #print("app_now: ", appendant_now)
+            if appendant_prev == "" and appendant_now == "":
+                #print("empty", "empty", e_i)
+                e_i, num_ethers = self.dict_sl_sl[str(e_i)]
+                config+=self.ether*num_ethers+self.SL[e_i]
+            elif appendant_prev != "" and appendant_now == "":
+                #print("non-empty", "empty", e_i)
+                e_i, num_ethers = self.dict_sc_sl[str(e_i)]
+                config+=self.ether*num_ethers+self.SL[e_i]
+            elif appendant_prev == "" and appendant_now != "":
+                #print("empty", "non-empty", e_i)
+                rl_i, num_ethers = self.dict_sl_rl[str(e_i)]
+                config+=self.ether*num_ethers+self.RL[rl_i]
+                e_i = (rl_i+22)%30
+                a, e_i = self.encode_appendant(appendant, leader_i=e_i)
+                config+=a+8*self.ether
+            elif appendant_prev != "" and appendant_now != "":
+                #print("non-empty", "non-empty", e_i)
+                rl_i, num_ethers = self.dict_rl[str(e_i)]
+                config+=self.ether*num_ethers+self.RL[rl_i]
+                e_i = (rl_i+22)%30
+                a, e_i = self.encode_appendant(appendant, leader_i=e_i)
+                config+=a+8*self.ether
+            #print()
+
+
+        #now we have to append raw leader for the next round of cyclic tag
+        appendant = cyclic_tag[-1]
+        if appendant == "":
+            #print("empty", e_i)
+            rl_i, num_ethers = self.dict_sl_rl[str(e_i)]
+            config+=self.ether*num_ethers+self.RL[rl_i]
+            e_i = (rl_i+22)%30
+        else:
+            #print("non-empty", e_i)
+            rl_i, num_ethers = self.dict_rl[str(e_i)]
+            config+=self.ether*num_ethers+self.RL[rl_i]
+            e_i = (rl_i+22)%30
+
+        self.last_e_glider_index = e_i
+        #print("last e glider index: ", self.last_e_glider_index)
+        return config
+
+    def encode_ossifiers(self, num_ossifiers):
+        oss_index, num_ether = self.dict_oss[self.oss_index]
+        ossifiers = self.O[oss_index]+self.ether*(num_ether+self.long_ossifier_distance)
+        #print("new oss index: ", oss_index)
+        for o in range(num_ossifiers-1):
+            oss_index, num_ether = self.dict_oss[oss_index]
+            #print("new oss index: ", oss_index)
+            ossifiers = self.O[oss_index]+self.ether*(num_ether+self.long_ossifier_distance)+ossifiers
+        self.oss_index = oss_index
+        return ossifiers
+
+    def init_hidden_world(self):
+        """Creates the initial configuration encoding the cyclic tag system, ossifiers, and tape symbols."""
+
         #computes the closest safe distance of the first ossifier, this depends on the length of the appendants and the first occurrence of Y + some margin for each tabe symbol
         r_tape_seq = self.init_tape[::-1]
         mask = [int(i =="Y") for i in r_tape_seq]
-        first_appendant_index = list(np.array(mask)*np.array([int(len(i)>0) for i in (self.cyclic_tag*len(self.init_tape))[:len(self.init_tape)]])).index(1) #finds the first instance of a non-empty appendant hitting a Y to determine the distance of the first batch of ossifiers
+        try:
+            first_appendant_index = list(np.array(mask)*np.array([int(len(i)>0) for i in (self.cyclic_tag*len(self.init_tape))[:len(self.init_tape)]])).index(1) #finds the first instance of a non-empty appendant hitting a Y to determine the distance of the first batch of ossifiers
+        except ValueError:
+            print("This is not an admissible cyclic tag since nothing will get appended to the tape")
         first_ossifier_distance = len(self.init_tape)*28+self.max_appendant_len*150*first_appendant_index+139
-        self.short_ossifier_distance = 67
-
 
         #encode first six ossifiers
         num_oss = 6
@@ -291,35 +384,35 @@ class Rule110Universality():
             oss_index, num_ether = self.dict_oss[oss_index]
             #print("new oss index: ", oss_index)
             ossifiers = self.O[oss_index]+self.ether*(num_ether+self.long_ossifier_distance)+ossifiers
-
         ossifiers = 3*self.ether+ossifiers
-
-
-        #encode tape symbols        
-        tape_config, e_i = self.encode_tape()
-        self.last_e_glider_index = e_i
         self.oss_index = oss_index
 
-        tape_center = len(ossifiers)+len(tape_config)
-        self.left_tape_end = len(ossifiers)
-        self.right_tape_end = len(ossifiers)+len(tape_config)
+        #encode tape symbols        
+        tape_config = self.encode_tape()
+        leader_index=2
+        tape_config+=4*self.ether+self.L[leader_index]
+        self.last_e_glider_index = (leader_index+18)%30
+
+        tape_center = len(ossifiers)+len(tape_config)//2
         
         #encode cyclic tag system
         num_cyclic_tag = int(self.w//(self.total_num_of_symbols*600))+1
-        #print(f"appending {num_cyclic_tag} of tag systems")
+        print(f"appending {num_cyclic_tag} of tag systems")
         cyclic_tag_config = self.encode_cyclic_tag(num_cyclic_tag)
         self.len_cyclic_tag = int(len(cyclic_tag_config)//num_cyclic_tag)
         init_config = 3*self.ether+ossifiers+tape_config+cyclic_tag_config+3*self.ether
 
-
+        #initialize the world and keep track of the cell at position 0
         self.hidden_world = torch.tensor(init_config, dtype=torch.int)
         self.world_center =  tape_center
         self.img_center = tape_center
         self.zero_index = tape_center
-        self.action_window = (len(ossifiers), len(ossifiers)+len(tape_config))
         self.str_c = self.to_str(self.hidden_world)
-
+        
     def update_hidden_world(self, prolong_right = True):
+        """Check whether current configuration needs to be prolonged by a periodic ossifier sequence to the left, or by the cyclic tag sequence to the right. 
+        For optimization, if there are any garbage gliders detected, they are cropped since they do not influence the simulating process in any way."""
+
         self.str_c = self.to_str(self.hidden_world)
 
         #checking whether ossifiers are intact and cropping garbage gliders
@@ -337,7 +430,7 @@ class Rule110Universality():
 
         #find the all raw leaders
         rl = []
-        for s in self.strRL:
+        for s in self.strRL+self.strSL:
             if s in self.str_c:
                 rl += [m.start() for m in re.finditer(s, self.str_c)]
 
@@ -362,7 +455,6 @@ class Rule110Universality():
             cropped_config = ossifiers+cropped_config
             cropped_center_index+=len(ossifiers)
 
-        old_center = self.world_center
         cropped_config = int(self.w//7)*self.ether+cropped_config+int(self.w//7)*self.ether
 
         diff = cropped_center_index+len(int(self.w//7)*self.ether)-self.world_center
@@ -373,7 +465,21 @@ class Rule110Universality():
         self.zero_index = cropped_center_index+len(int(self.w//7)*self.ether)
         self.hidden_world = torch.tensor(cropped_config, dtype=torch.int) 
 
+ 
+    """ Defining Decoder."""
 
+    def decode_static_symbols(self, cg_config):
+        dec = {4: "N", 5: "Y"}
+        tape = ""
+        largest_tape_index = -np.inf
+        while (4 in cg_config) or (5 in cg_config):
+            indices = torch.where((cg_config == 4) | (cg_config == 5))[0]
+            tape_index = indices[-1].item()  # Get the last index
+            tape+= dec[cg_config[tape_index].item()]
+            cg_config = cg_config[:tape_index-200]
+            largest_tape_index = max(largest_tape_index, tape_index)
+        return tape, largest_tape_index
+    
     def coarse_grain(self, row):
         """
         Coarse-grains a single row of the input matrix.
@@ -458,57 +564,42 @@ class Rule110Universality():
             )
 
         return new_row
- 
-    def find_leader(self):
-        self.str_c = self.to_str(self.hidden_world)
-        for l in self.strL:
-            if l in self.str_c:
-                return self.str_c.index(l)
-        return None
-
-    def decode_static_symbols(self, cg_config):
-        dec = {4: "N", 5: "Y"}
-        tape = ""
-        largest_tape_index = -np.inf
-        while (4 in cg_config) or (5 in cg_config):
-            indices = torch.where((cg_config == 4) | (cg_config == 5))[0]
-            tape_index = indices[-1].item()  # Get the last index
-            tape+= dec[cg_config[tape_index].item()]
-            cg_config = cg_config[:tape_index-200]
-            largest_tape_index = max(largest_tape_index, tape_index)
-        return tape, largest_tape_index
 
     def check_if_config_decodable(self, config):
         str_c = self.to_str(config)
 
         #find the first leader
         first_l = -1
-        for s in self.strL:
+        for s in self.strL_beg:   # find index of prepared leader
             if s in str_c:
                 first_l = str_c.index(s)
 
-        if first_l == -1: #config is not decodable since there is not raw leader on the tape
+        if first_l == -1: #config is not decodable since there is no prepared leader on the tape
             return None, None
 
         ossifier_index = -np.inf
-        for s in self.strA4:
+        for s in self.strA4:   # find index of the ossifier closest to tape data
             j = str_c.rfind(s)
             if j>-1:
                 ossifier_index = max(j+len(self.right_crop(s+self.str_ether)), ossifier_index)
 
 
         cg_config = self.coarse_grain(config[:first_l])
-        static_tape_content, largest_tape_index = self.decode_static_symbols(cg_config)
+        _, largest_tape_index = self.decode_static_symbols(cg_config) #finds index of first static tape data symbol
 
-        if np.abs(first_l-largest_tape_index)<300:
+        if np.abs(first_l-largest_tape_index)<100:    #leader is close enough to first tape symbol to guarantee that all current tape data and moving data are decodable
             return first_l, "tape"
-        elif np.abs(first_l-ossifier_index)<300:
+        elif np.abs(first_l-ossifier_index)<100:   # there is no more data on the tape, this means the initial configuraiton of the cyclic tag was not admissible, the computation will halt
             return first_l, "oss"
         else:
-            return None, None
+            return None, None  # not decodable
 
     def tau(self):
-        IT = 210
+        """ Delay Function tau: return the number of iterations needed for the next prepared leader to reach the next tape data symbol.
+        This funciton simply iterates Rule 110 until the next leader is prepared and close enough to tape data, detects this, and return the number of iterations needed """
+
+
+        IT = 210   # iteration step compatible with temporal periods of all gliders on the tape
         it = 0
 
         init_time = self.time
@@ -522,7 +613,6 @@ class Rule110Universality():
                 break
 
         self.img_center = leader_index
-        #print(self.time - init_time)
         if dec_type == "oss":
             print("no more data on the tape; halting")
             return False, None
@@ -530,38 +620,48 @@ class Rule110Universality():
             return True, self.time - init_time
 
     def decode(self, right_start_read):
-        right_crop = min(right_start_read, len(self.hidden_world))
+        """
+        Decodes the Rule 110 configuration into the cyclic tag tape.
+        Parameters:
+        right_start_read : int, the rightmost position delimiting where the decoder should start reading (the decoder reads from right to left)
 
-        self.str_c = self.to_str(self.hidden_world[:right_crop])
+        The decoder first finds the relevant information of the configuration: this is delimited to the left by the first ossifier and to the right by the leader. Then, it crops the configuration to this region. We are guaranteed all information about tape data is present there.
+        However, some tape data might be present as moving data rather than static data. In order to decode this more easily the decoder proceeds as follows: it iterates Rule 110, prepending as many ossifiers as needed to the left until it is guaranteed that all moving data have been ossified into static data. 
+        Crucially, during this process no cyclic tag data is appended to the tape, otherwise they would collide with the tape data and destroy it. Subsequently, the funciton decode_static_symbols is caaled to determine the tape content.
+        """
+
+
+        right_crop_index = min(right_start_read, len(self.hidden_world)) #determines the rightmost position of the decoder reading window (the data is read from right to left)
+
+        self.str_c = self.to_str(self.hidden_world[:right_crop_index])
 
         a4_index = -1
-        for s in self.strA4:
+        for s in self.strA4:      # finds the last ossifier
             a4_index = max(a4_index, self.str_c.rfind(s))
         if a4_index == -1:
             raise ValueError("No ossifier found in the string.")
 
         last_ossifier_index = max(0, a4_index-200*14) #should not cut any ether in half
 
-        str_c = self.str_c[:last_ossifier_index]
+        str_c = self.str_c[:last_ossifier_index] # configuration of bounded size used for decoding
 
         a4_index = -1
-        for s in self.strA4:
+        for s in self.strA4:  # finds the second to last ossifier
             a4_index = max(a4_index, str_c.rfind(s))
         if a4_index == -1:
             raise ValueError("No ossifier found in the string.")
 
         second_to_last_ossifier_index = max(0, a4_index-200*14) #should not cut any ether in half
 
-        #print("second to last ossifier index: ", second_to_last_ossifier_index)
 
-        decoder_window = self.hidden_world[second_to_last_ossifier_index:right_crop] #this is all the information the decoder has access to
+        decoder_window = self.hidden_world[second_to_last_ossifier_index:right_crop_index] #this is all the information the decoder has access to
         self.str_c = self.to_str(decoder_window)
         decoder_window = self.crop(self.str_c)
         self.str_c = self.to_str(decoder_window)
         
         #find the first leader
         first_l = -1
-        for s in self.strL:
+        for s in self.strL_beg:
             first_l = max(first_l, self.str_c.rfind(s))
             if s in self.str_c:
                 first_l = self.str_c.index(s)
@@ -570,7 +670,7 @@ class Rule110Universality():
 
         #print("first leader index: ", first_l)
 
-        decoder_window = decoder_window[:first_l]
+        decoder_window = decoder_window[:first_l]   # further cropping the configuration from all the cyclic tag data to make sure, they do not destroy any tape data symbols
         self.str_c = self.to_str(decoder_window)
         self.hidden_world = torch.tensor(200*self.ether+decoder_window+200*self.ether, dtype=torch.int)
         
@@ -582,10 +682,9 @@ class Rule110Universality():
         #print("ossifiers found: ", len(ossifiers))
         count = 0
 
-        cropped_config = self.to_str(self.hidden_world)
         dist_to_hit_tape_data = np.inf
 
-        while dist_to_hit_tape_data > 1000:
+        while dist_to_hit_tape_data > 1000:  # this is the distance between the last ossifier and static tape data. If this is small enough, we are guaranteed that all moving data has been ossified.
             count += 1
             #print(count)
             
@@ -598,7 +697,7 @@ class Rule110Universality():
                 if e in self.str_c:
                     Es += [m.start() for m in re.finditer(e, self.str_c)]
 
-            if not count%20:
+            if not count%1:
                 #print("Es found: ", len(Es))
                 cg_config = self.coarse_grain(self.hidden_world)
                 static_tape_content, largest_tape_index = self.decode_static_symbols(cg_config)
@@ -620,104 +719,56 @@ class Rule110Universality():
 
         return static_tape_content
 
-    def step(self, it = 1, update = True):
-        """
-            Steps the automaton one timestep, recording the state of the world in self.world.
-        """
-
-        for t in range(it):
-            indices = (torch.roll(self.hidden_world,shifts=(1))*4+self.hidden_world*2+torch.roll(self.hidden_world,shifts=(-1))*1) # (W,), compute in parallel all sums
-            self.hidden_world=self.rule[indices] # This is the same as [ rule[indices[i]] for i in range(W)]
-            self.time += 1
-            if (not self.time%210) and update:
-                self.update_hidden_world()
         
-    def plot_worldmap(self, save_path = None, title = None):
-        height, width, _ = self._worldmap.shape
-        aspect_ratio = width / height
-        plt.figure(figsize=(aspect_ratio * 10, 10))  # Adjust the scaling factor (e.g., 10) as needed
-        plt.imshow(self._worldmap)
-        plt.axis('off')
-        if title:
-            plt.title(title, fontsize=20)
-
-        if save_path:
-            plt.savefig(save_path, bbox_inches='tight', pad_inches=0)
-        else:
-            plt.show()
-
-    def draw(self, iterations, save_path = None, title = None):
-        self._worldmap = torch.zeros((iterations, self.w, 3), dtype=torch.float32)
-        self.worlds = torch.zeros((iterations, self.w+2*self.offset), dtype=torch.int) # Vector of (render_size, W) elements
-
-        self.init_hidden_world = self.hidden_world.clone()
-        self.init_time = self.time
-
-        l = self.find_leader()
-        if not l:
-            print("no leader found")
-            self.img_center = self.world_center
-        else:
-            self.img_center = l
-
-
-        for i in range(iterations):
-            self.step(update = False)
-            self.world = self.hidden_world[self.img_center-int(self.w//2)-self.offset:self.img_center+int(self.w//2)+self.offset]
-            self.worlds[i, :] = self.world
-            
-        
-        #self.worlds = self.coarse_grain(self.worlds)
-
-        for i in range(iterations):
-            self._worldmap[i, :, :] = self.colors[self.worlds[i, self.offset:-self.offset]]
-
-        self.plot_worldmap(save_path, title = None)
-
-        self.hidden_world = self.init_hidden_world.clone()
-        self.time = self.init_time
 
 
 
-def test_decoder(img_size, tape, cyclic_tag, IT = 10):
-    folder = tape+"_"+"-".join(cyclic_tag)
+def simulate_and_decode(img_size, tape, cyclic_tag, IT = 10):
+    folder = "Tape:"+tape+",CyclicTag:"+"-".join(cyclic_tag)
     if not os.path.exists(folder):
         os.makedirs(folder)
 
     auto = Rule110Universality((img_size), tape, cyclic_tag)
-    auto.get_init_hidden_world()
+    auto.init_hidden_world()
 
-    save_path=f"{folder}/{str(0)}_{tape[::-1]}.png"
+    save_path=f"{folder}/Iteration:{str(0)},Tape:{tape[::-1]}.png"
     auto.draw(2000, save_path, title=tape)
 
     print("total length of encoded cyclic tag: ", auto.len_cyclic_tag)
 
+
+    #determines the exact index of the rightmost position delimiting where the decoder should start reading
     right_start_read = auto.zero_index+2*auto.long_ossifier_distance*len(tape)+auto.len_cyclic_tag
 
-    for it in range(IT):
-        init_zero_index = auto.zero_index
-        init_world_center = auto.world_center
-        next_it, t = auto.tau()
+    for it in range(IT):   
+        init_zero_index = auto.zero_index  #during iterations, as new periodic patterns are prepended and appended to the configuration if needed, we have to keep track of the cell with zero index, this is the initial position of the zero index
+
+        """compute tau"""
+        next_it, t = auto.tau()   # delay function tau return next_it: a bool determining whether there is any more tape data (if not computation terminates) and t: the delay time
         diff = auto.zero_index - init_zero_index
-        right_start_read += diff
-        print(f"iteration: {it}, sim time: {t}, config size: {auto.hidden_world.shape[0]}, internally, zero index was shifted by {diff}")
+        right_start_read += diff # updates the position of the rightmost reading window
+        print(f"iteration: {it}, delay time: {t}")
         
         if not next_it:
             print("no more data on the tape; halting")
             return
         
+
+        """decode"""
         init_oss_index = auto.oss_index
         init_leader_index = auto.last_e_glider_index
         init_hidden_world = auto.hidden_world.clone()
         init_time = auto.time
 
 
-        
-
         tape_content = auto.decode(right_start_read)
-        save_path=f"{folder}/{str(it+1)}_{tape_content}.png"
-        right_start_read = right_start_read - int(np.round(t*auto.e_speed))+int(auto.len_cyclic_tag//len(auto.cyclic_tag))
+        save_path=f"{folder}/Iteration:{str(it+1)},Tape:{tape_content}.png"
 
+        """shift"""
+        right_start_read = right_start_read - int(np.round(t*auto.e_speed))+int(auto.len_cyclic_tag//len(auto.cyclic_tag)) # shifting the configration by the two shift vectors: sigma_{e_speed}^tau and by sigma_{avg_cyclic_tag_length}
+
+
+        """draw a part of the current configuration"""
         auto.hidden_world = init_hidden_world.clone()
         auto.oss_index = init_oss_index
         auto.last_e_glider_index = init_leader_index
@@ -726,12 +777,6 @@ def test_decoder(img_size, tape, cyclic_tag, IT = 10):
         l = auto.find_leader()
 
         print("buffer for decoding window: ", right_start_read-l)
-
-        #if not l:
-        #    print("auto no leader found")
-        #else:
-        #    print("auto leader found: ", l)
-
         auto.draw(2000, save_path, title=tape_content)
 
 
@@ -739,9 +784,12 @@ def test_decoder(img_size, tape, cyclic_tag, IT = 10):
         print() 
 
 
-img_size = 4500
-tape = "YN"
-cyclic_tag = ["YYNYNY", "NYNNYNNNYNNY", "NNNYNY", "NNNYYY"]
 
-test_decoder(img_size, tape, cyclic_tag, IT = 50)
+
+
+img_size = 4500
+tape = "NYY"  
+cyclic_tag = ["YYNYNY", "YNYNYN", ""]
+
+simulate_and_decode(img_size, tape, cyclic_tag, IT = 50)
 
